@@ -71,3 +71,20 @@ cargo run --release -p rhythm-bench -- --song "set in stone" --detector <id>
    ```bash
    cargo run --release -p rhythm-bench --      --predictions /tmp/adtof_plus_preds.json      --out benchmarks/adtof-plus.json
    ```
+
+### C. ADT_STR evaluation
+
+Run the upstream ADT_STR checkpoint on the same exported active-comp bus stems.
+The evaluator uses the published `setting-tau-0.8` snapshot, applies the
+upstream evaluation peak normalization, and retains MIDI onset velocities in
+the predictions.
+
+```bash
+uv run scripts/eval_adt_str.py --device cuda --out target/adt-str-predictions.json
+cargo run --release -p rhythm-bench -- \
+  --predictions target/adt-str-predictions.json --out benchmarks/adt-str.json
+```
+
+Use `--device cpu` for CPU inference. On NixOS, CUDA may require
+`/run/opengl-driver/lib` on `LD_LIBRARY_PATH`. The benchmark JSON records
+`gpu_rtf` when the evaluator runs with CUDA.
