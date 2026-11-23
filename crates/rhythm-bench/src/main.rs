@@ -1,5 +1,6 @@
 //! Shared Crescendum album benchmark CLI (`rhythm-bench`).
 
+mod beat_grid;
 mod metrics;
 mod rpp;
 
@@ -8,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
-use rhythm_hits::{DetectorInput, DetectorRegistry, PieceInput};
+use rhythm_hits::{DetectorInput, DetectorOutput, DetectorRegistry, PieceInput};
 use serde::{Deserialize, Serialize};
 
 use crate::metrics::{
@@ -29,6 +30,29 @@ enum BenchMode {
     WithTriggers,
     /// Pass only the mono summed acoustic drum_bus (for stereo/bus neural models).
     BusOnly,
+    /// Pass only the close kick mic and score against the kick trigger.
+    KickOnly,
+    /// Pass only the close snare mic and score against the snare trigger.
+    SnareOnly,
+    /// Pass only the named tom close mic and score against its trigger.
+    T1Only,
+    T2Only,
+    T3Only,
+    T4Only,
+}
+
+impl BenchMode {
+    fn solo_piece(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::KickOnly => Some(("kick", "kick_in")),
+            Self::SnareOnly => Some(("snare", "snare_top")),
+            Self::T1Only => Some(("t1", "t1")),
+            Self::T2Only => Some(("t2", "t2")),
+            Self::T3Only => Some(("t3", "t3")),
+            Self::T4Only => Some(("t4", "t4")),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -63,6 +87,10 @@ struct Cli {
     #[arg(long)]
     out: Option<PathBuf>,
 
+    /// Score beat and downbeat events against the REAPER project grid.
+    #[arg(long, conflicts_with_all = ["predictions", "export_stems"])]
+    beat_grid: bool,
+
     #[arg(long)]
     threshold_db: Option<f64>,
 
@@ -96,7 +124,7 @@ struct SongBenchmark {
     cpu_rtf: f64,
     dead_triggers: Vec<String>,
     by_class: BTreeMap<String, ClassMetrics>,
-    overall: ClassMetrics,
+    overall: Option<ClassMetrics>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -193,24 +221,31 @@ fn run_rust_detector(
     mode: BenchMode,
     kit: &RenderedKit,
     cli: &Cli,
-) -> Result<(Vec<(String, f64)>, f64), String> {
+) -> Result<(DetectorOutput, f64), String> {
     let detector = registry
         .get(detector_id)
         .ok_or_else(|| format!("unknown detector '{detector_id}'"))?;
 
     let t0 = Instant::now();
     let out = match mode {
-        BenchMode::BusOnly => {
-            let bus = kit
+        BenchMode::BusOnly
+        | BenchMode::KickOnly
+        | BenchMode::SnareOnly
+        | BenchMode::T1Only
+        | BenchMode::T2Only
+        | BenchMode::T3Only
+        | BenchMode::T4Only => {
+            let (name, track) = mode.solo_piece().unwrap_or(("drum_bus", "drum_bus"));
+            let mic = kit
                 .tracks
-                .get("drum_bus")
-                .ok_or_else(|| "missing drum_bus".to_owned())?;
+                .get(track)
+                .ok_or_else(|| format!("missing {track} in {}", kit.song_name))?;
             let pieces = [PieceInput {
-                name: "drum_bus".to_owned(),
-                mic: bus.as_slice(),
+                name: name.to_owned(),
+                mic: mic.as_slice(),
                 trigger: None,
             }];
-            detector.detect(&DetectorInput {
+            detector.try_detect(&DetectorInput {
                 sample_rate: kit.sample_rate,
                 pieces: &pieces,
                 extra_mics: &[],
@@ -219,7 +254,7 @@ fn run_rust_detector(
                 retrig_ms: cli.retrig_ms,
                 tempo_bpm: Some(kit.bpm),
                 time_sig: Some(kit.time_sig),
-            })
+            })?
         }
         BenchMode::MicOnly | BenchMode::WithTriggers => {
             let use_trig = matches!(mode, BenchMode::WithTriggers);
@@ -246,13 +281,24 @@ fn run_rust_detector(
                     });
                 }
             }
+            if detector_id.starts_with("fts.hits.adtof-onnx") {
+                for name in ["drum_bus", "ohs"] {
+                    if let Some(mic) = kit.tracks.get(name) {
+                        pieces.push(PieceInput {
+                            name: name.to_owned(),
+                            mic,
+                            trigger: None,
+                        });
+                    }
+                }
+            }
             let mut extras = Vec::new();
             for k in ["ohs", "hihat", "ride", "rooms"] {
                 if let Some(m) = kit.tracks.get(k) {
                     extras.push(m.as_slice());
                 }
             }
-            detector.detect(&DetectorInput {
+            detector.try_detect(&DetectorInput {
                 sample_rate: kit.sample_rate,
                 pieces: &pieces,
                 extra_mics: &extras,
@@ -261,12 +307,11 @@ fn run_rust_detector(
                 retrig_ms: cli.retrig_ms,
                 tempo_bpm: Some(kit.bpm),
                 time_sig: Some(kit.time_sig),
-            })
+            })?
         }
     };
     let elapsed = t0.elapsed().as_secs_f64();
-    let hits = out.hits.into_iter().map(|h| (h.piece, h.at)).collect();
-    Ok((hits, elapsed))
+    Ok((out, elapsed))
 }
 
 fn main() {
@@ -292,7 +337,14 @@ fn run() -> Result<(), String> {
         None => None,
     };
 
+    let solo_piece = cli.mode.solo_piece().map(|(piece, _)| piece);
+    if solo_piece.is_some() && (cli.beat_grid || cli.export_stems.is_some()) {
+        return Err("Individual close-mic modes require a drum hit benchmark".into());
+    }
     let registry = DetectorRegistry::default();
+    if cli.beat_grid {
+        return beat_grid::run(&cli, &registry, &rpps);
+    }
     let mut song_results = Vec::new();
     let mut all_class_metrics: BTreeMap<String, Vec<ClassMetrics>> = BTreeMap::new();
     let mut all_overall_metrics: Vec<ClassMetrics> = Vec::new();
@@ -302,7 +354,10 @@ fn run() -> Result<(), String> {
     for rpp_path in &rpps {
         let session = parse_comped_rpp(rpp_path)?;
         let kit = render_comped_kit(&session)?;
-        let gt = extract_ground_truth(&kit);
+        let mut gt = extract_ground_truth(&kit);
+        if let Some(piece) = solo_piece {
+            gt.pieces.retain(|p| p.piece == piece);
+        }
 
         if let Some(ref export_dir) = cli.export_stems {
             export_song_stems(export_dir, &kit, &gt)?;
@@ -316,7 +371,7 @@ fn run() -> Result<(), String> {
             continue;
         }
 
-        let (preds, elapsed) = if let Some(ref ext) = external {
+        let (preds, elapsed): (Vec<_>, _) = if let Some(ref ext) = external {
             let list = ext
                 .songs
                 .get(&kit.song_name)
@@ -328,7 +383,10 @@ fn run() -> Result<(), String> {
             let el = ext.cpu_rtf.map_or(0.0, |rtf| rtf * kit.duration_secs);
             (list, el)
         } else {
-            run_rust_detector(&registry, &cli.detector, cli.mode, &kit, &cli)?
+            let (output, elapsed) =
+                run_rust_detector(&registry, &cli.detector, cli.mode, &kit, &cli)?;
+            let hits = output.hits.into_iter().map(|h| (h.piece, h.at)).collect();
+            (hits, elapsed)
         };
 
         let grouped = grouped_truth_and_preds(&gt, &preds);
@@ -350,8 +408,11 @@ fn run() -> Result<(), String> {
                 by_class.insert(cls.to_owned(), m);
             }
         }
-        let overall = aggregate_metrics(&song_class_list, &song_errs);
-        all_overall_metrics.push(overall.clone());
+        let overall = (solo_piece.is_none() || !song_class_list.is_empty())
+            .then(|| aggregate_metrics(&song_class_list, &song_errs));
+        if let Some(score) = &overall {
+            all_overall_metrics.push(score.clone());
+        }
 
         let dead_triggers: Vec<String> = gt
             .pieces
@@ -368,18 +429,28 @@ fn run() -> Result<(), String> {
         total_audio_secs += kit.duration_secs;
         total_elapsed_secs += elapsed;
 
-        println!(
-            "{:<22} | {:3.0} BPM | F1@20ms={:.3} (P={:.3} R={:.3}) | F1@50ms={:.3} | med_err={:4.2}ms | RTF={:.4}x | dead={}",
-            kit.song_name,
-            kit.bpm,
-            overall.f1_20ms,
-            overall.precision_20ms,
-            overall.recall_20ms,
-            overall.f1_50ms,
-            overall.median_abs_err_ms,
-            rtf,
-            dead_triggers.len()
-        );
+        if let Some(overall) = &overall {
+            println!(
+                "{:<22} | {:3.0} BPM | F1@20ms={:.3} (P={:.3} R={:.3}) | F1@50ms={:.3} | med_err={:4.2}ms | RTF={:.4}x | dead={}",
+                kit.song_name,
+                kit.bpm,
+                overall.f1_20ms,
+                overall.precision_20ms,
+                overall.recall_20ms,
+                overall.f1_50ms,
+                overall.median_abs_err_ms,
+                rtf,
+                dead_triggers.len()
+            );
+        } else {
+            println!(
+                "{:<22} | {:3.0} BPM | unscored (no healthy {} trigger) | RTF={:.4}x",
+                kit.song_name,
+                kit.bpm,
+                solo_piece.unwrap_or("selected piece"),
+                rtf,
+            );
+        }
 
         song_results.push(SongBenchmark {
             song: kit.song_name,
@@ -397,6 +468,9 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
 
+    if solo_piece.is_some() && all_overall_metrics.is_empty() {
+        return Err("none of the selected songs has a healthy trigger for this piece".into());
+    }
     let mut agg_by_class = BTreeMap::new();
     for (cls, list) in &all_class_metrics {
         let errs: Vec<f64> = list
@@ -421,7 +495,9 @@ fn run() -> Result<(), String> {
     let engine = external
         .as_ref()
         .map_or_else(|| cli.detector.clone(), |e| e.engine.clone());
-    let mode_str = if external.is_some() {
+    let mode_str = if let Some(piece) = solo_piece {
+        format!("{piece}-only")
+    } else if external.is_some() {
         "external-predictions".to_owned()
     } else {
         format!("{:?}", cli.mode).to_ascii_lowercase()
