@@ -84,6 +84,8 @@ struct ExternalPredictions {
     engine: String,
     #[serde(default)]
     cpu_rtf: Option<f64>,
+    #[serde(default)]
+    gpu_rtf: Option<f64>,
     songs: HashMap<String, Vec<ExternalHit>>,
 }
 
@@ -108,6 +110,8 @@ struct CorpusBenchmark {
     total_audio_secs: f64,
     total_elapsed_secs: f64,
     cpu_rtf: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gpu_rtf: Option<f64>,
     by_class: BTreeMap<String, ClassMetrics>,
     overall: ClassMetrics,
     songs: Vec<SongBenchmark>,
@@ -448,6 +452,7 @@ fn run() -> Result<(), String> {
         total_audio_secs,
         total_elapsed_secs,
         cpu_rtf,
+        gpu_rtf: external.as_ref().and_then(|predictions| predictions.gpu_rtf),
         by_class: agg_by_class,
         overall,
         songs: song_results,

@@ -44,6 +44,18 @@
       "url": "https://github.com/polimi-ispl/larsnet",
       "sample_rate_hz": 44100,
       "notes": "~562 MB 5-stem drum separator (Kick, Snare, Toms, Hi-Hat, Cymbals). Optional downloadable pack only."
+    },
+    {
+      "id": "adtof-plus-mdx23c",
+      "name": "ADTOF+ (MDX23C kit separation and ADTOF transcription)",
+      "task": "drum_transcription_and_separation",
+      "license": "CC BY-NC-SA 4.0 (ADTOF transcription weights); MIT (MDX23C checkpoint mirror)",
+      "tier": "non_commercial",
+      "filename": "drumsep_5stems_mdx23c_jarredou.ckpt",
+      "sha256": "1f8e636fb674b88a52c8399fde9a4ebe2b72b065ca07eed4e03ab1c9f0bfb2e0",
+      "url": "https://huggingface.co/xavriley/source_separation_mirror/resolve/main/drumsep_5stems_mdx23c_jarredou.ckpt",
+      "sample_rate_hz": 44100,
+      "notes": "Optional Python evaluation pack. The upstream dependency supplies the ADTOF weights. The evaluator fetches the separator checkpoint and configuration to the model cache."
     }
   ]
 }

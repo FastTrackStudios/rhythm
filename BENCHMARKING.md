@@ -47,6 +47,40 @@ cargo run --release -p rhythm-bench -- --song "set in stone" --detector <id>
 ```
 
 ### B. Python / `uv` / PyTorch / ONNX prototypes (zero RPP parsing needed!)
+
+#### ADT_STR
+
+Run the upstream ADT_STR checkpoint on the same exported active-comp bus stems.
+The evaluator uses the published `setting-tau-0.8` snapshot, applies the
+upstream evaluation peak normalization, and retains MIDI onset velocities in
+the predictions.
+
+```bash
+uv run scripts/eval_adt_str.py --device cuda --out target/adt-str-predictions.json
+cargo run --release -p rhythm-bench -- \
+  --predictions target/adt-str-predictions.json --out benchmarks/adt-str.json
+```
+
+Use `--device cpu` for CPU inference. On NixOS, CUDA may require
+`/run/opengl-driver/lib` on `LD_LIBRARY_PATH`. The benchmark JSON records
+`gpu_rtf` when the evaluator runs with CUDA.
+
+#### ADTOF+
+
+Run the optional ADTOF+ pack on each exported acoustic input. ADTOF+ separates
+the supplied drum mix into five kit stems before transcribing them. The evaluator
+preserves the open/closed hi-hat, crash/ride, and velocity output in the predictions.
+
+```bash
+for stem in drum_bus ohs; do
+  uv run scripts/eval_adtof_plus.py --input "$stem" --out "target/adtof-plus-$stem.json"
+  cargo run --release -p rhythm-bench -- \
+    --predictions "target/adtof-plus-$stem.json" --out "benchmarks/adtof-plus-$stem.json"
+done
+```
+
+#### Exporting stems and scoring predictions
+
 1. **Export rendered active-comp WAV stems + `gt_onsets.json` once:**
    ```bash
    cargo run --release -p rhythm-bench --      --export-stems "$HOME/.cache/fts-rhythm/crescendum-stems"
